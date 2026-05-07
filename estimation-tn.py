@@ -1,227 +1,139 @@
-import os
+import numpy as np                           # 导入numpy库并简写为np
+from mindquantum.core.gates import X, H      # 导入量子门H, X
+from mindquantum.simulator import Simulator  # 从mindquantum.simulator中导入Simulator类
+from mindquantum.core.circuit import Circuit # 导入Circuit模块，用于搭建量子线路
+from mindquantum.core.gates import Measure   # 引入测量门
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # disable GPU
-
-import tensorcircuit as tc
-import jax
-import jax.numpy as jnp
-from jax.scipy.optimize import minimize
-import numpy as np
-from jax.example_libraries import optimizers
-import tensorflow as tf
-import math
-
-tc.set_backend('jax')
-K = tc.backend
-
-# user specified
-
-import sys
-
-# 计算l列表中第一个元素的长度，即nqubits
 nqubits = 8
-pauli_matrices = {
-    'I': np.array([[1, 0], [0, 1]]),
-    'X': np.array([[0, 1], [1, 0]]),
-    'Y': np.array([[0, -1j], [1j, 0]]),
-    'Z': np.array([[1, 0], [0, -1]])
-}
+iterm = 3.2
+trace = []
+if iterm < 4.4:
+    iterm += 0.2
+    # postfix = f'H6_{iterm:.1f}_sto-3g'
+    postfix = 'TFIM_8'
 
-def tensor_to_2d(tensor):
-    # 获取张量的维度
-    shape = tensor.shape
-    num_dims = len(shape)
+    niter = 20
+    num_layers = 2
+    bond = 64
+    # postfix = 'slater_plus_4to8layers_40iter'
+    resultI = []
+    for iter in range(1):
+        niter = 5
+        qasm_texts = []
+        diags = np.zeros((niter, 2**nqubits), dtype=complex)
 
-    # 分割前后维度
-    half = num_dims // 2
+        for i in range(niter):
+            with open(f'saved_models_new/{i}iter_{num_layers}layers_{postfix}_{bond}.qasm') as file:
+                qasm_texts.append(file.read())
+            diags[i] = np.load(f'saved_models_new/{i}iter_{num_layers}layers_diag_{postfix}_{bond}.npy')
 
-    # 合并前半部分和后半部分的维度
-    new_shape = (np.prod(shape[:half]), np.prod(shape[half:]))
+        def reorder_qubits(x, nqubits):
+            return np.transpose(x.reshape([2] * nqubits)).reshape(-1)
 
-    # 重塑张量为二维矩阵
-    reshaped_tensor = tensor.reshape(new_shape)
+        # stvec = np.load(f"test/ground_state_H6_{iterm:.1f}_sto-3g.npy") # this input state is a density matrix
+        #
+        # H = np.load(f"test/H6_{iterm:.1f}_sto-3g.npy")
+        stvec = np.load(f"TFIM_8_ground_state.npy")  # this input state is a density matrix
 
-    return reshaped_tensor
-# 使用NumPy加载.npy文件
-init_obs = np.load(f"{nqubits}-K-Local-H.npy")
-init_obs = tensor_to_2d(init_obs)
+        H = np.load(f"TFIM_8_hamiltonian.npy")
+        ground_trurh_val = stvec.conjugate().T @ H @ stvec
+        # print(np.trace(np.load("SparseH_8.npy") @ np.load("ground_state_SparseH_8.npy")))
+        print(ground_trurh_val)
 
-num_steps_range = range(5)
-num_layers_range = [2]
+        import re
+        import math
 
+        def find_eval_replace_expressions(input_string):
+            pattern = r'(\d*)/\((\d*)\*pi\)|(\d*)\*pi/(\d*)'
+            matches = re.finditer(pattern, input_string)
+            updated_string = input_string
+            for match in matches:
+                num1 = match.group(1) if match.group(1) else match.group(3)
+                num2 = match.group(2) if match.group(2) else match.group(4)
+                result = eval(f'{num1} / {num2} * math.pi')
+                expression = match.group(0)
+                updated_string = updated_string.replace(expression, str(result), 1)  # 仅替换第一个匹配项
 
-def put_vqc(c, param, nlayers):
-    for j in range(nlayers):
-        if j != 0:
-            for i in range(j % 2, nqubits, 2):
-                c.unitary(i, (i + 1) % nqubits,
-                          unitary=np.array([[1, 0, 0, 0], [0, 0, 1j, 0], [0, 1j, 0, 0], [0, 0, 0, 1]]), name="iswap")
-        for i in range(nqubits):
-            c.rx(i, theta=param[j, i, 0])
-        for i in range(nqubits):
-            c.ry(i, theta=param[j, i, 1])
-        for i in range(nqubits):
-            c.rx(i, theta=param[j, i, 2])
-    return c
+            return updated_string
 
+        from mindquantum.io import OpenQASM
+        estval = 0
+        sim = Simulator('mqvector', nqubits)
 
-def put_vqc_inv(c, param, nlayers):
-    for j in reversed(range(nlayers)):
-        for i in reversed(range(nqubits)):
-            c.rx(i, theta=-param[j, i, 2])
-        for i in reversed(range(nqubits)):
-            c.ry(i, theta=-param[j, i, 1])
-        for i in reversed(range(nqubits)):
-            c.rx(i, theta=-param[j, i, 0])
-        if j != 0:
-            for i in reversed(range(j % 2, nqubits, 2)):
-                c.unitary(i, (i + 1) % nqubits,
-                          unitary=np.array([[1, 0, 0, 0], [0, 0, -1j, 0], [0, -1j, 0, 0], [0, 0, 0, 1]]),
-                          name="iswap-inv")
-    return c
+        for i in range(niter):
+            circuit = OpenQASM().from_string(find_eval_replace_expressions(qasm_texts[i]))
+            sim.reset()
+            sim.set_qs(reorder_qubits(stvec, nqubits))
+            sim.apply_circuit(circuit)
+            resstvec = sim.get_qs()
+            diags_flip = reorder_qubits(diags[i], nqubits)
+            estval += resstvec.conjugate() @ np.diag(diags_flip) @ resstvec
 
+        estval_st = estval
 
-def transfer(param, obs, nlayers):
-    input_state = obs
-    dmc = tc.DMCircuit(nqubits, dminputs=input_state)
-    put_vqc(dmc, param, nlayers)
-    return dmc.state()
+        print(estval_st)
+        trace.append(np.abs(estval_st-ground_trurh_val))
 
+        importance = np.max(np.abs(diags), axis=1)
 
-def transfer_inv(param, obs, nlayers):
-    input_state = obs
-    dmc = tc.DMCircuit(nqubits, dminputs=input_state)
-    put_vqc_inv(dmc, param, nlayers)
-    return dmc.state()
+        importance /= np.sum(importance)
 
+        import matplotlib.pyplot as plt
 
-def off_diag(obs):
-    dim = obs.shape[0]
-    return obs * (1 - jnp.eye(dim))
+        plt.scatter(range(niter), importance)
 
+        def estimate_diag(diag_obs, bit_string_data, nshots):
+            x = np.array([[n if (j==int(bs, 2)) else 0 for j in range(len(diag_obs))] for bs, n in (bit_string_data.items())])
+            x = np.sum(x, axis=0)
+            return np.sum(x * diag_obs) / nshots
 
-def loss(param, obs, nlayers):
-    off_diag_mat = off_diag(transfer(param, obs, nlayers))
-    return jnp.real(jnp.trace(off_diag_mat @ off_diag_mat))
+        import math
 
+        sim = Simulator('mqvector', nqubits)
+        nruns = 1
 
-init_scale = 0.1
-#maxiter = 5000
+        def estimtate(nshots_total):
+            estval_list_run = np.zeros(nruns, dtype=complex)
+            nshots_iter = [math.floor(nshots_total * x) for x in importance]
+            for i in range(niter):
+                if nshots_iter[i]:
+                    circuit = OpenQASM().from_string(find_eval_replace_expressions(qasm_texts[i]))
+                    for j in range(nqubits):
+                        circuit += Measure(f'q{j}').on(j)
+                    diags_flip = reorder_qubits(diags[i], nqubits)
+                    for j in range(nruns):
+                        sim.reset()
+                        sim.set_qs(reorder_qubits(stvec, nqubits))
+                        result = sim.sampling(circuit, shots=nshots_iter[i])
+                        contribution = estimate_diag(diags_flip, result.bit_string_data, nshots_iter[i])
+                        estval_list_run[j] += contribution
+            return estval_list_run
 
-loss_vag = K.jit(
-    K.value_and_grad(loss), static_argnums=(2,)
-)
+        T = [12, 45, 160, 572, 2038,7256,25848,92041]
+        output_file = f'greedy_{postfix}.txt'
+        for t in T:
+            result = []
+            for i in range(50):
+                estimated_expectation_value = estimtate(t)
+                result.append(estimated_expectation_value)
+            print("result:", result)
+            # 保存原始测量值到文件
+            # np.savetxt(f'raw_measurements_H4_{postfix}_2000.txt', result)
+            # 计算偏差
+            cal = ground_trurh_val
+            squared_deviations = [np.abs(x - cal) ** 2 for x in result]
+            # 计算标准差
+            std_dev = np.sqrt(np.mean(squared_deviations))
+            resultI.append(std_dev)
 
-rho = np.load(f"sparse_rho_{nqubits}.npy")
-diags = np.zeros((2, 2 ** nqubits), dtype=complex)
-total_trace = 0
-
-
-def reorder_qubits(x, nqubits):
-    return np.transpose(x.reshape([2] * nqubits)).reshape(-1)
-
-
-obs = init_obs
-print(f"cal:{np.real(np.trace(rho @ init_obs))}")
-
-num_steps = 5
-nlayers = 2
-
-def getParam():
-    param_k = []
-    diags = np.zeros((num_steps, 2 ** nqubits), dtype=complex)
-    for i in num_steps_range:
-        diags[i] = np.load(f'saved_models/{num_steps}iter_{nlayers}layers_diag_{nqubits}_{i}.npy')
-        param = np.load(f'saved_models/{num_steps}iter_{nlayers}layers_param_{nqubits}_{i}.npy')
-        param_k.append(param)
-    return param_k, diags
-
-
-def reorder_qubits(x, nqubits):
-    return np.transpose(x.reshape([2] * nqubits)).reshape(-1)
-
-
-nruns = 1
-
-
-def estimate_expectation_value(rho, H, T, L):
-    # 贪婪投影分解
-    # U_k, Lambda_k = greedy_projected_decomposition(H, num_qubits, L)
-    param_k, Lambda_k = getParam()
-
-    pk = calculate_pk(Lambda_k)
-    # 按照采样概率分配测量次数
-    nshots_iter = [math.floor(T * p) for p in pk]
-    print("nshots_iter:", nshots_iter)
-    # 存储每次实验的期望值贡献
-    estval_list_run = np.zeros(nruns, dtype=complex)
-
-    # 遍历所有电路
-    for i in range(len(param_k)):
-        # 如果该电路的测量次数大于 0
-        if nshots_iter[i] > 0:
-            for j in range(nruns):
-                # 在选定的电路上进行量子态转换和测量
-                bt = apply_Uk_and_measure(param_k[i], rho, nqubits, nshots_iter[i])
-                # 根据对角矩阵 Lambda_k 计算期望值贡献
-                diags_flip = reorder_qubits(Lambda_k[i], nqubits)
-                contribution = estimate_diag(diags_flip, bt, nshots_iter[i])
-                estval_list_run[j] += contribution
-
-    return np.median(estval_list_run)
-
-
-def estimate_diag(diag_obs, bit_string_data, nshots):
-    x = np.array([[n if (j == int(bs, 2)) else 0 for j in range(len(diag_obs))] for bs, n in (bit_string_data.items())])
-    x = np.sum(x, axis=0)
-    return np.sum(x * diag_obs) / nshots
-
-
-def calculate_pk(Lambda_k):
-    importance = np.max(np.abs(Lambda_k), axis=1)
-    importance /= np.sum(importance)
-    return importance
-
-
-def apply_Uk_and_measure(param_k, rho, num_qubits, shots):
-    from qiskit import QuantumCircuit, transpile
-    from qiskit.circuit.library import UnitaryGate
-    from qiskit.quantum_info import DensityMatrix, Operator
-    dm = DensityMatrix(rho)
-    iswap_matrix = np.array([[1, 0, 0, 0],
-                             [0, 0, 1j, 0],
-                             [0, 1j, 0, 0],
-                             [0, 0, 0, 1]])
-    iswap_gate = UnitaryGate(iswap_matrix, label="iswap")
-    qc = QuantumCircuit(num_qubits)
-    for j in reversed(range(nlayers)):
-        for i in reversed(range(num_qubits)):
-            qc.rx(param_k[j, i, 2], i)
-
-        for i in reversed(range(num_qubits)):
-            qc.ry(param_k[j, i, 1], i)
-
-        for i in reversed(range(num_qubits)):
-            qc.rx(param_k[j, i, 0], i)
-
-        if j != 0:
-            for i in reversed(range(j % 2, num_qubits, 2)):
-                qc.append(iswap_gate, [(i + 1) % num_qubits,i])
-    dm2 = dm.evolve(qc)
-    counts = dm2.sample_counts(shots)
-    return counts
-
-
-T = 54000
-result = []
-for i in range(50):
-    estimated_expectation_value = estimate_expectation_value(rho, init_obs, T, num_layers_range[0])
-    result.append(estimated_expectation_value)
-# 计算偏差
-cal = np.real(np.trace(rho @ init_obs))
-squared_deviations = [(x - cal) ** 2 for x in result]
-# 计算标准差
-std_dev = np.sqrt(np.mean(squared_deviations))
-print("std:", std_dev)
-print(f"cal:{np.real(np.trace(rho @ init_obs))}")
-percent = (np.real(np.trace(rho @ init_obs)) - tf.math.real(estimated_expectation_value)) / np.real(np.trace(rho @ init_obs))
+    np.savetxt(f'error_{num_layers}layer_{postfix}.txt', resultI)
+# np.savetxt(f'trace_11_10.txt', trace)
+# Plot the results
+# plt.figure(figsize=(10, 6))
+# plt.plot([12,45,160,572,2038,7259,25848], resultI, 'o-')
+# plt.xlabel('samples')
+# plt.ylabel('error')
+# plt.title('error vs. samples')
+# plt.grid(True)
+# plt.savefig(f'error vs. samples.png')
+# plt.show()
